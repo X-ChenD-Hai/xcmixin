@@ -4,21 +4,9 @@ namespace xcmixin {
 #define METHOD                              \
     template <typename, typename, typename> \
     class
-template <typename Derived>
-struct EmptyBase {
-    template <typename D = Derived>
-    constexpr static bool valid_class() {
-        return true;
-    }
-};
-template <typename meta>
-struct method_validator {
-    template <typename MethodClass, typename Derived>
-    static consteval bool valid_method() {
-        return true;
-    }
-};
+
 namespace details {
+
 template <typename T>
 struct return_type {
     using type = T;
@@ -41,6 +29,22 @@ struct method_recorder {
     struct concat_helper<method_recorder<ext_methods...>>
         : return_type<method_recorder<methods..., ext_methods...>> {};
 };
+template <typename meta>
+struct method_validator {
+    template <typename MethodClass, typename Derived>
+    static consteval bool valid_method() {
+        return true;
+    }
+};
+template <typename Derived>
+struct EmptyBase {
+    using method_recorder = method_recorder<>;
+    template <typename D = Derived>
+    constexpr static bool valid_class() {
+        return true;
+    }
+};
+
 template <METHOD method_>
 struct meta_method {
     template <typename Base, typename Derived, typename method_type>
@@ -60,6 +64,14 @@ struct recorder_concat_helper<T, Ts...>
     : return_type<typename T::template concat<
           deref_type<recorder_concat_helper<Ts...>>>> {};
 
+template <typename Method, typename Derived, typename = void>
+constexpr bool vaild_base_class = true;
+template <typename Method, typename Derived>
+constexpr auto
+    vaild_base_class<Method, Derived, std::void_t<typename Method::base_meta>> =
+        method_validator<typename Method::base_meta>::template valid_method<
+            typename Method::base, Derived>();
+
 template <typename Derived, METHOD... methods>
 struct impl_methods_helper;
 template <typename Derived, METHOD... methods>
@@ -72,9 +84,9 @@ struct impl_methods_helper<Derived, method> {
         using method_recorder = method_recorder<method>;
         template <typename D = Derived>
         constexpr static bool valid_class() {
-            return ::xcmixin::method_validator<meta_method<method>>::
-                       template valid_method<base, Derived>() &&
-                   base::valid_class();
+            return method_validator<meta_method<method>>::template valid_method<
+                       base, Derived>() &&
+                   vaild_base_class<base, Derived> && base::valid_class();
         }
     };
 };
@@ -88,9 +100,9 @@ struct impl_methods_helper<Derived, method, methods...> {
             base::method_recorder::template push_front<method>;
         template <typename D = Derived>
         constexpr static bool valid_class() {
-            return ::xcmixin::method_validator<meta_method<method>>::
-                       template valid_method<base, Derived>() &&
-                   base::valid_class();
+            return method_validator<meta_method<method>>::template valid_method<
+                       base, Derived>() &&
+                   vaild_base_class<base, Derived> && base::valid_class();
         }
     };
 };
@@ -119,49 +131,46 @@ constexpr size_t class_size = 0;
 template <typename T>
 constexpr size_t class_size<T, std::void_t<decltype(sizeof(T))>> = sizeof(T);
 
-template <typename T = void>
+template <typename C1, typename C2, typename T = void>
 struct overload;
-template <>
-struct overload<void> {
+template <typename C1, typename C2>
+struct overload<C1, C2, void> {
     template <typename T1, typename T2>
     static consteval auto same(T1 member1, T2 member2) {
         return member1 == member2;
     }
 };
-template <typename R, typename... Args>
-struct overload<R(Args...)> {
+template <typename C1, typename C2, typename R, typename... Args>
+struct overload<C1, C2, R(Args...)> {
     static consteval auto same(R(member1)(Args...), R(member2)(Args...)) {
         return member1 == member2;
     }
-    template <typename C1, typename C2>
     static consteval auto same(R (C1::*member1)(Args...),
                                R (C2::*member2)(Args...)) {
         return member1 == member2;
     }
-    template <typename C1, typename C2>
     static consteval auto same(R (C1::*member1)(Args...) const,
                                R (C2::*member2)(Args...) const) {
         return member1 == member2;
     }
 };
-template <typename C, typename R, typename... Args>
-struct overload<R (C::*)(Args...)> {
-    template <typename C1, typename C2>
+template <typename C1, typename C2, typename C, typename R, typename... Args>
+struct overload<C1, C2, R (C::*)(Args...)> {
     static consteval auto same(R (C1::*member1)(Args...),
                                R (C2::*member2)(Args...)) {
         return member1 == member2;
     }
 };
-template <typename C, typename R, typename... Args>
-struct overload<R (C::*)(Args...) const> {
-    template <typename C1, typename C2>
+template <typename C1, typename C2, typename C, typename R, typename... Args>
+struct overload<C1, C2, R (C::*)(Args...) const> {
     static consteval auto same(R (C1::*member1)(Args...) const,
                                R (C2::*member2)(Args...) const) {
         return member1 == member2;
     }
 };
-template <typename R, typename... Args>
-struct overload<R (*)(Args...)> : public overload<R(Args...)> {};
+template <typename C1, typename C2, typename R, typename... Args>
+struct overload<C1, C2, R (*)(Args...)> : public overload<C1, C2, R(Args...)> {
+};
 }  // namespace details
 
 using details::class_size;
@@ -171,6 +180,7 @@ using details::impl_methods_recorders;
 using details::is_impl_method;
 using details::meta_method;
 using details::method_recorder;
+using details::method_validator;
 using details::overload;
 using details::recorder_concat;
 
@@ -227,6 +237,7 @@ concept Impl = is_impl_method<T, method...>;
         using Self = __VA_ARGS__;                                   \
         using ConstSelf = const std::remove_const_t<Self>;          \
         using base = ext_method<Base, Self, meta>;                  \
+        using base_meta = ::xcmixin::meta_method<ext_method>;       \
         using method_recorder =                                     \
             base::method_recorder::template push_front<ext_method>; \
         using MethodClass = meta::template method<base, Self, meta>;
@@ -258,8 +269,9 @@ concept Impl = is_impl_method<T, method...>;
                   "Derived must be derived from " #method)
 // Require the method to be not shadowed, check whether the method is not
 // shadowed
-#define xcmixin_no_hiding(name, ...)                                         \
-    static_assert(::xcmixin::overload<__VA_ARGS__>::same(&MethodClass::name, \
-                                                         &Derived::name),    \
-                  "method " #name " is shadowed ")
+#define xcmixin_no_hiding(name, ...)                                  \
+    static_assert(                                                    \
+        ::xcmixin::overload<MethodClass, Derived, __VA_ARGS__>::same( \
+            &MethodClass::name, &Derived::name),                      \
+        "method " #name " is shadowed ")
 #undef METHOD
